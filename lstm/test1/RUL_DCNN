@@ -1,0 +1,159 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import pandas as pd
+from sklearn import preprocessing
+import numpy as np
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader,Dataset
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# class MyDataset(Dataset):
+#     def __init__(self, file):
+#         self.data=
+#
+#     def __getitem__(self, index):
+#         return self.data[index]
+#
+#     def __len__(self):
+#         return len(self.data)
+#############3
+#读取数据集
+##############3
+train_df = pd.read_csv('D:/project/datasets/CMAPSSData/train_FD001.txt', sep=" ", header=None)
+train_df.drop(train_df.columns[[26, 27]], axis=1, inplace=True)  # 去掉26,27列并用新生成的数组替换原数组
+train_df.columns = ['id', 'cycle', 'setting1', 'setting2', 'setting3', 's1', 's2', 's3', 's4', 's5',
+                    's6', 's7', 's8', 's9', 's10', 's11', 's12', 's13', 's14', 's15', 's16', 's17',
+                    's18', 's19', 's20', 's21']
+# 先按照'id'列的元素进行排序，当'id'列的元素相同时按照'cycle'列进行排序
+train_df = train_df.sort_values(['id', 'cycle'])
+
+test_df = pd.read_csv('D:/project/datasets/CMAPSSData/test_FD001.txt', sep=" ", header=None)
+test_df.drop(test_df.columns[[26, 27]], axis=1, inplace=True)
+test_df.columns = ['id', 'cycle', 'setting1', 'setting2', 'setting3', 's1', 's2', 's3', 's4', 's5',
+                   's6', 's7', 's8', 's9', 's10', 's11', 's12', 's13', 's14', 's15', 's16', 's17',
+                   's18', 's19', 's20', 's21']
+
+truth_df = pd.read_csv('D:/project/datasets/CMAPSSData/RUL_FD001.txt', sep=" ", header=None)
+truth_df.drop(truth_df.columns[[1]], axis=1, inplace=True)
+
+# """Data Labeling - generate column RUL"""
+# 按照'id'来进行分组，并求出每个组里面'cycle'的最大值,此时它的索引列将变为id
+# 所以用reset_index()将索引列还原为最初的索引
+rul = pd.DataFrame(train_df.groupby('id')['cycle'].max()).reset_index()
+rul.columns = ['id', 'max']
+# 将rul通过'id'合并到train_df上，即在相同'id'时将rul里的max值附在train_df的最后一列
+train_df = train_df.merge(rul, on=['id'], how='left')
+# 加一列，列名为'RUL'
+train_df['RUL'] = train_df['max'] - train_df['cycle']
+# 将'max'这一列从train_df中去掉
+train_df.drop('max', axis=1, inplace=True)
+
+"""MinMax normalization train"""
+# 将'cycle'这一列复制给新的一列'cycle_norm'
+train_df['cycle_norm'] = train_df['cycle']
+# 在列名里面去掉'id', 'cycle', 'RUL'这三个列名
+cols_normalize = train_df.columns.difference(['id', 'cycle', 'RUL'])
+# 对剩下名字的每一列分别进行特征放缩
+min_max_scaler = preprocessing.MinMaxScaler()
+norm_train_df = pd.DataFrame(min_max_scaler.fit_transform(train_df[cols_normalize]),
+                             columns=cols_normalize,
+                             index=train_df.index)
+# 将之前去掉的再加回特征放缩后的列表里面
+join_df = train_df[train_df.columns.difference(cols_normalize)].join(norm_train_df)
+# 恢复原来的索引
+train_df = join_df.reindex(columns=train_df.columns)
+
+"""MinMax normalization test"""
+# 与上面操作相似，但没有'RUL'这一列
+test_df['cycle_norm'] = test_df['cycle']
+norm_test_df = pd.DataFrame(min_max_scaler.transform(test_df[cols_normalize]),
+                            columns=cols_normalize,
+                            index=test_df.index)
+test_join_df = test_df[test_df.columns.difference(cols_normalize)].join(norm_test_df)
+test_df = test_join_df.reindex(columns=test_df.columns)
+test_df = test_df.reset_index(drop=True)
+
+"""generate column max for test data"""
+# 第一列是id，第二列是同一个id对应的最大cycle值
+rul = pd.DataFrame(test_df.groupby('id')['cycle'].max()).reset_index()
+# 将列名改为id和max
+rul.columns = ['id', 'max']
+# 给rul文件里的数据列命名为'more'
+truth_df.columns = ['more']
+# 给truth_df增加id列，值为truth_df的索引加一
+truth_df['id'] = truth_df.index + 1
+# 给truth_df增加max列，值为rul的max列值加truth_df的more列,
+# truth_df['max']的元素是测试集里面每个id的最大cycle值加rul里每个id的真实剩余寿命
+truth_df['max'] = rul['max'] + truth_df['more']
+# 将'more'这一列从truth_df中去掉
+truth_df.drop('more', axis=1, inplace=True)
+
+
+"""generate RUL for test data"""
+test_df = test_df.merge(truth_df, on=['id'], how='left')
+test_df['RUL'] = test_df['max'] - test_df['cycle']
+test_df.drop('max', axis=1, inplace=True)
+
+sequence_length = 50
+
+
+"""采用分段线性退化假说：参照相关的文献，其分段的RUL认为>=130的RUL值，均标记为RUL=130
+    注意：部分文献的分段RUL=125
+    github上面一般也没有这样处理的代码，但是论文都是用的120-130
+"""
+
+# dataset=MyDataset(file)
+# dataloader=Dataloader(dataset, batch_size=512, shuffle=True)
+#
+
+#
+# ################3
+# #搭建神经网络
+# ################
+# class DCNN(nn.Module):
+#     def __init__(self):
+#         super(DCNN,self).__init__()
+#         self.net=nn.Sequential(
+#             nn.Conv1d,
+#             nn.Tanh(),
+#             nn.Conv1d(),
+#             nn.Tanh(),
+#             nn.Conv1d(),
+#             nn.Tanh(),
+#             nn.Conv1d(),
+#             nn.Tanh(),
+#             nn.Conv1d(),
+#             nn.Tanh(),
+#             nn.Flatten(),
+#             nn.Linear(?,100),
+#             nn.Tanh(),
+#             nn.Linear(100,1)
+#         )
+#         def forward(self,x):
+#             return self.net(x)
+#
+# #########
+# #loss
+# #########
+# criterion=nn.MSELoss()
+# loss=criterion(RUL_pred,)
+#
+# ########33
+# #optimizer
+# #####33
+# optimizer=torch.optim.Adam()
+#
+# optimizer.zero_grad()
+# loss.backward()
+# optimizer.step()
+#
+# #######3
+# #training
+# #####
+# for epoch in range():
+#     model.train()
+#
+# #########3
+# #testing
+# #########33
